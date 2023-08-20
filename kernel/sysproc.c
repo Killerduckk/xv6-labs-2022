@@ -1,16 +1,18 @@
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
+#include "date.h"
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
-
+#include "sysinfo.h"
 uint64
 sys_exit(void)
 {
   int n;
-  argint(0, &n);
+  if(argint(0, &n) < 0)
+    return -1;
   exit(n);
   return 0;  // not reached
 }
@@ -31,17 +33,19 @@ uint64
 sys_wait(void)
 {
   uint64 p;
-  argaddr(0, &p);
+  if(argaddr(0, &p) < 0)
+    return -1;
   return wait(p);
 }
 
 uint64
 sys_sbrk(void)
 {
-  uint64 addr;
+  int addr;
   int n;
 
-  argint(0, &n);
+  if(argint(0, &n) < 0)
+    return -1;
   addr = myproc()->sz;
   if(growproc(n) < 0)
     return -1;
@@ -54,11 +58,12 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
-  argint(0, &n);
+  if(argint(0, &n) < 0)
+    return -1;
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
-    if(killed(myproc())){
+    if(myproc()->killed){
       release(&tickslock);
       return -1;
     }
@@ -73,7 +78,8 @@ sys_kill(void)
 {
   int pid;
 
-  argint(0, &pid);
+  if(argint(0, &pid) < 0)
+    return -1;
   return kill(pid);
 }
 
@@ -88,4 +94,32 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64 sys_trace(void)
+{
+int mask;
+// 取 a0 寄存器中的值返回给 mask
+if(argint(0, &mask) < 0)
+return -1;
+// 把 mask 传给现有进程的 mask
+myproc()->mask = mask;
+return 0;
+}
+
+uint64 sys_sysinfo(void)
+{
+// addr is a user virtual address, pointing to a struct sysinfo
+uint64 addr;
+struct sysinfo info;
+struct proc *p = myproc();
+if (argaddr(0, &addr) < 0)
+return -1;
+// get the number of bytes of free memory
+info.freemem = free_mem();
+// get the number of processes whose state is not UNUSED
+info.nproc = nproc();
+if (copyout(p->pagetable, addr, (char *)&info, sizeof(info)) < 0)
+return -1;
+return 0;
 }
