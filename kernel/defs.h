@@ -96,7 +96,6 @@ struct proc*    myproc();
 void            procinit(void);
 void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
-void            setproc(struct proc*);
 void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             wait(uint64);
@@ -171,8 +170,6 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-int             uvmgetdirty(pagetable_t pagetable, uint64 va);
-int             uvmsetdirtywrite(pagetable_t pagetable, uint64 va);
 
 // plic.c
 void            plicinit(void);

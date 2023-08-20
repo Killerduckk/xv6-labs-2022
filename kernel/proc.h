@@ -80,31 +80,33 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
-// 虚拟内存地址，表示使用mmap系统调用文件映射的虚拟内存的区域的位置、大小、权限等
-struct vm_area {
-    uint64 addr;
-    int len;
-    // 权限
-    int prot;
-    int flags;
-    int offset;
-    struct file* f;
+#define VMASIZE 16
+struct vma {
+  int used;
+  uint64 addr;
+  int length;
+  int prot;
+  int flags;
+  int fd;
+  int offset;
+  struct file *file;
 };
 
-#define NVMA 16
 // Per-process state
 struct proc {
   struct spinlock lock;
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state
-  struct proc *parent;         // Parent process
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+
+  // wait_lock must be held when using this:
+  struct proc *parent;         // Parent process
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
@@ -115,5 +117,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  struct vm_area vma[NVMA];
+  struct vma vma[VMASIZE];     // vma of file system
 };

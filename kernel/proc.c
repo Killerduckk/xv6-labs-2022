@@ -6,12 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "fcntl.h"
-#include "sleeplock.h"
-#include "fs.h"
-#include "file.h"
-
-
-#define min(a, b) ((a) < (b) ? (a) : (b))
+#define MAP_SHARED      0x01
 
 struct cpu cpus[NCPU];
 
@@ -303,19 +298,18 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
-  // 创建子进程时, 需要将父进程的 VMA 结构体进行拷贝
-  for (i = 0; i < NVMA; ++i) {
-    if (p->vma[i].addr) {
-      np->vma[i] = p->vma[i];
-      filedup(np->vma[i].f);
-    }
-  }
-
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].used){
+      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(p->vma[i]));
+      filedup(p->vma[i].file);
+    }
+  }
 
   release(&np->lock);
 
@@ -355,51 +349,9 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
-  int i;
-  struct vm_area* vma;
-  uint maxsz = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
-  uint64 va;
-  uint n, n1, r;
 
   if(p == initproc)
     panic("init exiting");
-
-  // 对文件映射部分内存进行取消映射
-  for (i = 0; i < NVMA; ++i) {
-    if (p->vma[i].addr == 0) {
-      continue;
-    }
-    vma = &p->vma[i];
-    if ((vma->flags & MAP_SHARED)) {
-      // 遍历VMA数组对所有文件映射内存进行取消映射
-      for (va = vma->addr; va < vma->addr + vma->len; va += PGSIZE) {
-        if (uvmgetdirty(p->pagetable, va) == 0) {
-          continue;
-        }
-        n = min(PGSIZE, vma->addr + vma->len - va);
-        for (r = 0; r < n; r += n1) {
-          n1 = min(maxsz, n - i);
-          begin_op();
-          ilock(vma->f->ip);
-          if (writei(vma->f->ip, 1, va + i, va - vma->addr + vma->offset + i, n1) != n1) {
-            iunlock(vma->f->ip);
-            end_op();
-            panic("exit: writei failed");
-          }
-          iunlock(vma->f->ip);
-          end_op();
-        }
-      }
-    }
-    uvmunmap(p->pagetable, vma->addr, (vma->len - 1) / PGSIZE + 1, 1);
-    vma->addr = 0;
-    vma->len = 0;
-    vma->offset = 0;
-    vma->flags = 0;
-    vma->offset = 0;
-    fileclose(vma->f);
-    vma->f = 0;
-  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -407,6 +359,16 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+ for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].used) {
+      if(p->vma[i].flags & MAP_SHARED)
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].length);
+      fileclose(p->vma[i].file);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].length/PGSIZE, 1);
+      p->vma[i].used = 0;
     }
   }
 
@@ -448,6 +410,16 @@ exit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+
+  /*for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].used) {
+      if(p->vma[i].flags & MAP_SHARED)
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].length);
+      fileclose(p->vma[i].file);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].length/PGSIZE, 1);
+      p->vma[i].used = 0;
+    }
+  }*/
 
   release(&original_parent->lock);
 

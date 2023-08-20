@@ -5,11 +5,17 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 #include "sleeplock.h"
 #include "fs.h"
 #include "file.h"
-#include "fcntl.h"
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
 
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
 struct spinlock tickslock;
 uint ticks;
 
@@ -69,67 +75,43 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } 
-  // 对访问文件映射内存产生的page fault进行处理
-  else if (r_scause() == 12 || r_scause() == 13
-             || r_scause() == 15) {
-    char *pa;
-    uint64 va = PGROUNDDOWN(r_stval());
-    struct vm_area *vma = 0;
-    int flags = PTE_U;
-    int i;
-    // 根据发生page fault的地址去当前进程的VMA数组中找对应的VMA结构体
-    for (i = 0; i < NVMA; ++i) {
-      // 超过文件实际大小的部分, 内容都会是 0, 可以访问修改, 但最后都不会写回文件中.
-      if (p->vma[i].addr && va >= p->vma[i].addr
-          && va < p->vma[i].addr + p->vma[i].len) {
-        vma = &p->vma[i];
-        break;
-      }
-    }
-    if (!vma) {
-      goto err;
-    }
-    // 找到对应的VMA则表明本次page fault是由于访问文件映射的内存产生的，继续执行后续操作
-    if (r_scause() == 15 && (vma->prot & PROT_WRITE)
-        && walkaddr(p->pagetable, va)) {
-      if (uvmsetdirtywrite(p->pagetable, va)) {
-        goto err;
-      }
-    } else {
-      // Lazy allocation, 使用kalloc先分配一个物理页, 并使用memset进行清空
-      if ((pa = kalloc()) == 0) {
-        goto err;
-      }
-      memset(pa, 0, PGSIZE);
-      ilock(vma->f->ip);
-      // 使用readi()根据发生page fault的地址从文件的相应部分读取内容到分配的物理页
-      if (readi(vma->f->ip, 0, (uint64) pa, va - vma->addr + vma->offset, PGSIZE) < 0) {
-        iunlock(vma->f->ip);
-        goto err;
-      }
-      // 设置访问权限
-      iunlock(vma->f->ip);
-      if ((vma->prot & PROT_READ)) {
-        flags |= PTE_R;
-      }
-      // 对于写权限此处只有本次是 Store Page fault 时才会设置
-      if (r_scause() == 15 && (vma->prot & PROT_WRITE)) {
-        flags |= PTE_W | PTE_D;
-      }
-      if ((vma->prot & PROT_EXEC)) {
-        flags |= PTE_X;
-      }
-      // 使用mappages()将物理页映射到用户进程的页面值
-      if (mappages(p->pagetable, va, PGSIZE, (uint64) pa, flags) != 0) {
-        kfree(pa);
-        goto err;
-      }
-    }
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    if(va >= p->sz || va > MAXVA || PGROUNDUP(va) == PGROUNDDOWN(p->trapframe->sp)) p->killed = 1;
+	else {
+      struct vma *vma = 0;
+      for (int i = 0; i < VMASIZE; i++) {
+        if (p->vma[i].used == 1 && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length) {
+          vma = &p->vma[i];
+		  //printf("trap mmap: %d, addr: %d, used:%d\n", i, p->vma[i].addr, p->vma[i].used);
+          break;
+        }
+      }
+      if(vma) {
+        va = PGROUNDDOWN(va);
+        uint64 offset = va - vma->addr;
+        uint64 mem = (uint64)kalloc();
+        if(mem == 0) {
+          p->killed = 1;
+        } else {
+          memset((void*)mem, 0, PGSIZE);
+		  ilock(vma->file->ip);
+          readi(vma->file->ip, 0, mem, offset, PGSIZE);
+          iunlock(vma->file->ip);
+          int flag = PTE_U;
+          if(vma->prot & PROT_READ) flag |= PTE_R;
+          if(vma->prot & PROT_WRITE) flag |= PTE_W;
+          if(vma->prot & PROT_EXEC) flag |= PTE_X;
+          if(mappages(p->pagetable, va, PGSIZE, mem, flag) != 0) {
+            kfree((void*)mem);
+            p->killed = 1;
+          }
+        }
+      }
+    }
   } else {
-err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -144,6 +126,7 @@ err:
 
   usertrapret();
 }
+
 
 //
 // return to user space

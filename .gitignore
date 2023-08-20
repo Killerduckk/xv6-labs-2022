@@ -22,4 +22,5 @@ xv6.out*
 submissions/
 ph
 barrier
-*.pyc
+/lab-*.json
+.DS_Store
