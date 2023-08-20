@@ -53,7 +53,7 @@ usertrap(void)
   if(r_scause() == 8){
     // system call
 
-    if(p->killed)
+    if(lockfree_read4(&p->killed))
       exit(-1);
 
     // sepc points to the ecall instruction,
@@ -67,43 +67,17 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if(r_scause() == 13 || r_scause() == 15) {
-    uint64 fault_va = r_stval();  // 出错虚拟地址
-    if(fault_va >= MAXVA)
-      p->killed = 1;
-    else{
-      uint64 pageup_va=PGROUNDDOWN(fault_va);
-      if(IScowpage(p->pagetable,pageup_va)==-1)
-        p->killed = 1;
-      else{
-          uint64 pa = walkaddr(p->pagetable, pageup_va);  // 获取对应的物理地址
-          pte_t* pte = walk(p->pagetable, pageup_va, 0);  // 获取对应的PTE
-        
-          if(cntGET((char*)pa)==1){
-            *pte |= PTE_W;
-            *pte &= ~RSW;
-          }
-          else{
-            char* mem = kalloc();
-            memmove(mem, (char*)pa, PGSIZE);
+  } else {
 
-            // 先清除PTE_V，否则在mappagges中会判定为remap
-            *pte &= ~PTE_V;
-            mappages(p->pagetable, pageup_va, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~RSW);
-
-            // 将原来的物理内存引用计数减1
-            kfree((char*)PGROUNDDOWN(pa));
-          }
-        }
-      }
-}  else {
+    
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if(p->killed)
+  if(lockfree_read4(&p->killed))
     exit(-1);
+  
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
@@ -218,7 +192,13 @@ devintr()
       uartintr();
     } else if(irq == VIRTIO0_IRQ){
       virtio_disk_intr();
-    } else if(irq){
+    }
+#ifdef LAB_NET
+    else if(irq == E1000_IRQ){
+      e1000_intr();
+    }
+#endif
+    else if(irq){
       printf("unexpected interrupt irq=%d\n", irq);
     }
 

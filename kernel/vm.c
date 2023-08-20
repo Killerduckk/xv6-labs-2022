@@ -4,9 +4,10 @@
 #include "elf.h"
 #include "riscv.h"
 #include "defs.h"
+#include "spinlock.h"
+#include "proc.h"
 #include "fs.h"
 
-#define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1))
 /*
  * the kernel's page table.
  */
@@ -30,6 +31,14 @@ kvmmake(void)
 
   // virtio mmio disk interface
   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+#ifdef LAB_NET
+  // PCI-E ECAM (configuration space), for pci.c
+  kvmmap(kpgtbl, 0x30000000L, 0x30000000L, 0x10000000, PTE_R | PTE_W);
+
+  // pci.c maps the e1000's registers here.
+  kvmmap(kpgtbl, 0x40000000L, 0x40000000L, 0x20000, PTE_R | PTE_W);
+#endif  
 
   // PLIC
   kvmmap(kpgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
@@ -175,8 +184,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
+    if((*pte & PTE_V) == 0) {
+      printf("va=%p pte=%p\n", a, *pte);
       panic("uvmunmap: not mapped");
+    }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -304,7 +315,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  // char *mem;
+  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -313,31 +324,19 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-   // 仅对可写页面设置COW标记
-    if(flags & PTE_W) {
-      flags = (flags | RSW) & ~PTE_W;
-      *pte = PA2PTE(pa) | flags;
-      //设置有效位
+    if((mem = kalloc()) == 0)
+      goto err;
+    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto err;
     }
-
-
-    // if((mem = kalloc()) == 0)
-    //   goto err;
-    // memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
-      uvmunmap(new, 0, i / PGSIZE, 1);
-      return -1;  
-      //若映射出错，直接退出
-      // kfree(mem);
-      // goto err;
-    }
-    cntADD((char*)pa);
   }
   return 0;
 
-//  err:
-//   uvmunmap(new, 0, i / PGSIZE, 1);
-//   return -1;
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -364,29 +363,6 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
-   
-    if(IScowpage(pagetable,va0)==0){
-        //如果是COW页面，需要进行处理
-      pte_t* pte = walk(pagetable, va0, 0);  // 获取对应的PTE
-      if(cntGET((char*)pa0)==1){
-        
-        *pte |= PTE_W;
-        *pte &= ~RSW;
-      }
-      else{
-        char* mem = kalloc();
-        memmove(mem, (char*)pa0, PGSIZE);
-
-        // 先清除PTE_V，否则在mappagges中会判定为remap
-        *pte &= ~PTE_V;
-        mappages(pagetable, va0, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~RSW);
-
-        // 将原来的物理内存引用计数减1
-        kfree((char*)PGROUNDDOWN(pa0));
-        pa0= (uint64)mem;
-      }
-    }
-    
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
@@ -408,7 +384,7 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -468,3 +444,6 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+
+
