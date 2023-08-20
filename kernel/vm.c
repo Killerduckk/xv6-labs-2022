@@ -6,6 +6,7 @@
 #include "defs.h"
 #include "fs.h"
 
+#define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1))
 /*
  * the kernel's page table.
  */
@@ -43,7 +44,7 @@ kvmmake(void)
   // the highest virtual address in the kernel.
   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 
-  // allocate and map a kernel stack for each process.
+  // map kernel stacks
   proc_mapstacks(kpgtbl);
   
   return kpgtbl;
@@ -61,12 +62,7 @@ kvminit(void)
 void
 kvminithart()
 {
-  // wait for any previous writes to the page table memory to finish.
-  sfence_vma();
-
   w_satp(MAKE_SATP(kernel_pagetable));
-
-  // flush stale entries from the TLB.
   sfence_vma();
 }
 
@@ -208,12 +204,12 @@ uvmcreate()
 // for the very first process.
 // sz must be less than a page.
 void
-uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
+uvminit(pagetable_t pagetable, uchar *src, uint sz)
 {
   char *mem;
 
   if(sz >= PGSIZE)
-    panic("uvmfirst: more than a page");
+    panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
@@ -223,7 +219,7 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
 // Allocate PTEs and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
 uint64
-uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
   char *mem;
   uint64 a;
@@ -239,7 +235,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
       return 0;
     }
     memset(mem, 0, PGSIZE);
-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
+    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
       kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
@@ -308,7 +304,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -317,19 +313,31 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+   // 仅对可写页面设置COW标记
+    if(flags & PTE_W) {
+      flags = (flags | RSW) & ~PTE_W;
+      *pte = PA2PTE(pa) | flags;
+      //设置有效位
     }
+
+
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;  
+      //若映射出错，直接退出
+      // kfree(mem);
+      // goto err;
+    }
+    cntADD((char*)pa);
   }
   return 0;
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
+//  err:
+//   uvmunmap(new, 0, i / PGSIZE, 1);
+//   return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -356,6 +364,29 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+   
+    if(IScowpage(pagetable,va0)==0){
+        //如果是COW页面，需要进行处理
+      pte_t* pte = walk(pagetable, va0, 0);  // 获取对应的PTE
+      if(cntGET((char*)pa0)==1){
+        
+        *pte |= PTE_W;
+        *pte &= ~RSW;
+      }
+      else{
+        char* mem = kalloc();
+        memmove(mem, (char*)pa0, PGSIZE);
+
+        // 先清除PTE_V，否则在mappagges中会判定为remap
+        *pte &= ~PTE_V;
+        mappages(pagetable, va0, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~RSW);
+
+        // 将原来的物理内存引用计数减1
+        kfree((char*)PGROUNDDOWN(pa0));
+        pa0= (uint64)mem;
+      }
+    }
+    
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
