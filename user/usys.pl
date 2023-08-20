@@ -36,3 +36,8 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+<<<<<<< Updated upstream
+=======
+entry("connect");
+entry("pgaccess");
+>>>>>>> Stashed changes

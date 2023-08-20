@@ -132,8 +132,15 @@ found:
     return 0;
   }
 
+  // Allocate a usyscall page.
+  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
+
   if(p->pagetable == 0){
     freeproc(p);
     release(&p->lock);
@@ -145,7 +152,7 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  p->usyscall->pid = p->pid;
   return p;
 }
 
@@ -158,6 +165,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->usyscall)
+    kfree((void*)p->usyscall);
+  p->usyscall = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -202,6 +212,16 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
+  // map the USYSCALL just below TRAPFRAME(set PTE_U for user access)
+  if(mappages(pagetable, USYSCALL, PGSIZE,
+              (uint64)(p->usyscall), PTE_R | PTE_U) < 0) {
+      printf("map usyscall failed\n");
+      uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+      uvmunmap(pagetable, TRAPFRAME, 1, 0);
+      uvmfree(pagetable, 0);
+      return 0;
+  }
+
   return pagetable;
 }
 
@@ -212,6 +232,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -399,14 +420,22 @@ wait(uint64 addr)
   for(;;){
     // Scan through table looking for exited children.
     havekids = 0;
+<<<<<<< Updated upstream
     for(pp = proc; pp < &proc[NPROC]; pp++){
       if(pp->parent == p){
         // make sure the child isn't still in exit() or swtch().
         acquire(&pp->lock);
+=======
+    for(np = proc; np < &proc[NPROC]; np++){
+      if(np->parent == p){
+        // make sure the child isn't still in exit() or swtch().
+        acquire(&np->lock);
+>>>>>>> Stashed changes
 
         havekids = 1;
         if(pp->state == ZOMBIE){
           // Found one.
+<<<<<<< Updated upstream
           pid = pp->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
                                   sizeof(pp->xstate)) < 0) {
@@ -416,6 +445,17 @@ wait(uint64 addr)
           }
           freeproc(pp);
           release(&pp->lock);
+=======
+          pid = np->pid;
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
+                                  sizeof(np->xstate)) < 0) {
+            release(&np->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          freeproc(np);
+          release(&np->lock);
+>>>>>>> Stashed changes
           release(&wait_lock);
           return pid;
         }
@@ -424,7 +464,11 @@ wait(uint64 addr)
     }
 
     // No point waiting if we don't have any children.
+<<<<<<< Updated upstream
     if(!havekids || killed(p)){
+=======
+    if(!havekids || p->killed){
+>>>>>>> Stashed changes
       release(&wait_lock);
       return -1;
     }
@@ -681,3 +725,7 @@ procdump(void)
     printf("\n");
   }
 }
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes

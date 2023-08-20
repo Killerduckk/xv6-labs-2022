@@ -104,4 +104,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+<<<<<<< Updated upstream
+=======
+  int mask;                    // mask for trace
+  struct usyscall *usyscall;   // data page for usyscall
+>>>>>>> Stashed changes
 };
