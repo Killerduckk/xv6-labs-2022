@@ -109,7 +109,6 @@ printf(char *fmt, ...)
       break;
     }
   }
-  va_end(ap);
 
   if(locking)
     release(&pr.lock);
@@ -132,4 +131,16 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+void backtrace(void)
+{
+  printf("backtrace:\n");
+  uint64 addr = r_fp();
+  while (PGROUNDUP(addr) - PGROUNDDOWN(addr) == PGSIZE)
+  {
+    uint64 ret_addr = *(uint64 *)(addr - 8);
+    printf("%p\n", ret_addr);
+    addr = *((uint64 *)(addr - 16));
+  }
 }

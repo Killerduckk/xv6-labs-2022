@@ -53,15 +53,15 @@ usertrap(void)
   if(r_scause() == 8){
     // system call
 
-    if(killed(p))
+    if(p->killed)
       exit(-1);
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
     p->trapframe->epc += 4;
 
-    // an interrupt will change sepc, scause, and sstatus,
-    // so enable only now that we're done with those registers.
+    // an interrupt will change sstatus &c registers,
+    // so don't enable until done with those registers.
     intr_on();
 
     syscall();
@@ -70,15 +70,58 @@ usertrap(void)
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    setkilled(p);
+    p->killed = 1;
   }
 
-  if(killed(p))
+  if(p->killed)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    if((++p->ticks ==  p->interval) && p->enable_handler){
+      p->enable_handler = 0;
+      // 保存当前trampframe上的用户寄存器
+        // 用于alarm函数调用完之后
+        p->his_epc = p->trapframe->epc; 
+        p->his_ra = p->trapframe->ra;
+        p->his_sp = p->trapframe->sp;
+        p->his_gp = p->trapframe->gp;
+        p->his_tp = p->trapframe->tp;
+        p->his_t0 = p->trapframe->t0;
+        p->his_t1 = p->trapframe->t1;
+        p->his_t2 = p->trapframe->t2;
+        p->his_t3 = p->trapframe->t3;
+        p->his_t4 = p->trapframe->t4;
+        p->his_t5 = p->trapframe->t5;
+        p->his_t6 = p->trapframe->t6;
+        p->his_a0 = p->trapframe->a0;
+        p->his_a1 = p->trapframe->a1;
+        p->his_a2 = p->trapframe->a2;
+        p->his_a3 = p->trapframe->a3;
+        p->his_a4 = p->trapframe->a4;
+        p->his_a5 = p->trapframe->a5;
+        p->his_a6 = p->trapframe->a6;
+        p->his_a7 = p->trapframe->a7;
+        p->his_s0 = p->trapframe->s0;
+        p->his_s1 = p->trapframe->s1;
+        p->his_s2 = p->trapframe->s2;
+        p->his_s3 = p->trapframe->s3;
+        p->his_s4 = p->trapframe->s4;
+        p->his_s5 = p->trapframe->s5;
+        p->his_s6 = p->trapframe->s6;
+        p->his_s7 = p->trapframe->s7;
+        p->his_s8 = p->trapframe->s8;
+        p->his_s9 = p->trapframe->s9;
+        p->his_s10 = p->trapframe->s10;
+        p->his_s11 = p->trapframe->s11;
+      p->ticks = 0;
+      p->alarm_trapframe = (p->trapframe);
+      // No need to call mannually, just let pc point at which the handler point at
+      //(*(void(*)())(p->handler))();
+      p->trapframe->epc = p->handler;
+    }
     yield();
+  }
 
   usertrapret();
 }
@@ -96,12 +139,11 @@ usertrapret(void)
   // we're back in user space, where usertrap() is correct.
   intr_off();
 
-  // send syscalls, interrupts, and exceptions to uservec in trampoline.S
-  uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
-  w_stvec(trampoline_uservec);
+  // send syscalls, interrupts, and exceptions to trampoline.S
+  w_stvec(TRAMPOLINE + (uservec - trampoline));
 
   // set up trapframe values that uservec will need when
-  // the process next traps into the kernel.
+  // the process next re-enters the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
   p->trapframe->kernel_trap = (uint64)usertrap;
@@ -122,11 +164,11 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to userret in trampoline.S at the top of memory, which 
+  // jump to trampoline.S at the top of memory, which 
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
-  uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
-  ((void (*)(uint64))trampoline_userret)(satp);
+  uint64 fn = TRAMPOLINE + (userret - trampoline);
+  ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,
